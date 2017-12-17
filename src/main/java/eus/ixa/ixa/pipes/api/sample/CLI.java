@@ -21,7 +21,6 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
-import java.io.UnsupportedEncodingException;
 import java.util.Properties;
 
 import org.jdom2.JDOMException;
@@ -77,7 +76,7 @@ public class CLI {
   /**
    * The parser that manages the tokenizer sub-command.
    */
-  private Subparser tokenParser;
+  private Subparser tokParser;
   private Subparser posParser;
   private Subparser nerParser;
   private Subparser chunkParser;
@@ -97,8 +96,10 @@ public class CLI {
    * parameters.
    */
   public CLI() {
-    tokenParser = subParsers.addParser(TOKEN_PARSER).help("The tokenizer CLI");
+    tokParser = subParsers.addParser(TOKEN_PARSER).help("The tokenizer CLI");
+    loadTokParameters();
     posParser = subParsers.addParser(POS_PARSER).help("The POS tagger CLI");
+    loadPOSParameters();
     nerParser = subParsers.addParser(NER_PARSER).help("The NER CLI");
     loadNERParameters();
     chunkParser = subParsers.addParser(CHUNK_PARSER).help("The chunker CLI");
@@ -168,18 +169,57 @@ public class CLI {
   }
 
   public final void tokenize() throws IOException, JDOMException {
-    BufferedReader breader = new BufferedReader(new InputStreamReader(
-        System.in, "UTF-8"));
-    BufferedWriter bwriter = new BufferedWriter(new OutputStreamWriter(
-        System.out, "UTF-8"));
+    BufferedReader breader = new BufferedReader(
+        new InputStreamReader(System.in, "UTF-8"));
+    BufferedWriter bwriter = new BufferedWriter(
+        new OutputStreamWriter(System.out, "UTF-8"));
     // read KAF document from inputstream
-    KAFDocument kaf = KAFDocument.createFromStream(breader);
-    //API begin
-    
+    final String lang = parsedArguments.getString("lang");
+    // API begin
+    KAFDocument kaf = new KAFDocument(lang, "newsreader");
+    final KAFDocument.LinguisticProcessor newLp = kaf
+        .addLinguisticProcessor("text", "ixa-pipe-tok-" + lang, version
+            + "-" + commit);
+    newLp.setBeginTimestamp();
+    eus.ixa.ixa.pipe.tok.Annotate annotator = new eus.ixa.ixa.pipe.tok.Annotate(breader, setTokenizeProperties(lang));
+    annotator.tokenizeToKAF(kaf);
+    newLp.setEndTimestamp();
+    //API end
+    bwriter.write(kaf.toString());
+    breader.close();
+    bwriter.close();
+
   }
 
-  public final void posTag() {
-
+  public final void posTag() throws IOException, JDOMException {
+    BufferedReader breader = new BufferedReader(
+        new InputStreamReader(System.in, "UTF-8"));
+    BufferedWriter bwriter = new BufferedWriter(
+        new OutputStreamWriter(System.out, "UTF-8"));
+    // read KAF document from inputstream
+    KAFDocument kaf = KAFDocument.createFromStream(breader);
+    // load parameters from CLI
+    String posModel = parsedArguments.getString("posModel");
+    String lemmaModel = parsedArguments.getString("lemmaModel");
+    String outputFormat = parsedArguments.getString("outputFormat");
+    Properties posProperties = setPOSProperties(posModel, lemmaModel, kaf.getLang());
+    //API begin
+    final KAFDocument.LinguisticProcessor newLp = kaf.addLinguisticProcessor(
+        "terms", "ixa-pipe-pos-" + Files.getNameWithoutExtension(posModel),
+        this.version + "-" + this.commit);
+    final eus.ixa.ixa.pipe.pos.Annotate annotator = new eus.ixa.ixa.pipe.pos.Annotate(posProperties);
+    newLp.setBeginTimestamp();
+    annotator.annotatePOSToKAF(kaf);
+    //API end
+    if (outputFormat.equalsIgnoreCase("conll")) {
+      bwriter.write(annotator.annotatePOSToCoNLL(kaf));
+    } else {
+      annotator.annotatePOSToKAF(kaf);
+      newLp.setEndTimestamp();
+      bwriter.write(kaf.toString());
+    }
+    breader.close();
+    bwriter.close();
   }
 
   public final void nerTag() throws IOException, JDOMException {
@@ -190,21 +230,19 @@ public class CLI {
         new OutputStreamWriter(System.out, "UTF-8"));
     // read KAF document from inputstream
     KAFDocument kaf = KAFDocument.createFromStream(breader);
-    // API begin
-    // load parameters into a properties
+    // load parameters from CLI
     String model = parsedArguments.getString("model");
     String outputFormat = parsedArguments.getString("outputFormat");
-    // building the properties object
-    Properties properties = setNERProperties(model);
+    // API begin
     KAFDocument.LinguisticProcessor newLp = kaf.addLinguisticProcessor(
         "entities", "ixa-pipe-nerc-" + Files.getNameWithoutExtension(model),
         version + "-" + commit);
     newLp.setBeginTimestamp();
-    Annotate annotator = new Annotate(properties);
+    Annotate annotator = new Annotate(setNERProperties(model));
     annotator.annotateNEs(kaf);
     newLp.setEndTimestamp();
-    String kafToString = null;
     // end of API
+    String kafToString = null;
     if (outputFormat.equalsIgnoreCase("conll03")) {
       kafToString = annotator.annotateNEsToCoNLL2003(kaf);
     } else if (outputFormat.equalsIgnoreCase("conll02")) {
@@ -228,6 +266,30 @@ public class CLI {
   public final void docClassify() {
   }
 
+  private void loadTokParameters() {
+    // specify language (for language dependent treatment of apostrophes)
+    tokParser.addArgument("-l", "--lang")
+        .choices("de", "en", "es", "eu", "fr", "gl", "it", "nl").required(true)
+        .help(
+            "It is REQUIRED to choose a language to perform annotation with ixa-pipe-tok.\n");
+  }
+  
+  /**
+   * Generate the annotation parameter of the CLI.
+   */
+  private void loadPOSParameters() {
+    this.posParser.addArgument("-m", "--posModel")
+        .required(true)
+        .help("It is required to provide a POS tagging model.");
+    this.posParser.addArgument("-lm", "--lemmaModel")
+         .required(true);
+    this.posParser.addArgument("-o", "--outputFormat")
+    .required(false)
+    .choices("naf", "conll")
+    .setDefault(Flags.DEFAULT_OUTPUT_FORMAT)
+    .help("Choose output format; it defaults to NAF.\n");
+  }
+
   /**
    * Create the available parameters for NER tagging.
    */
@@ -240,22 +302,32 @@ public class CLI {
         .setDefault(Flags.DEFAULT_OUTPUT_FORMAT)
         .help("Choose output format; it defaults to NAF.\n");
   }
-
+  
+  private static Properties setTokenizeProperties(String language) {
+    Properties annotateProperties = new Properties();
+    annotateProperties.setProperty("language", language);
+    annotateProperties.setProperty("normalize", "default");
+    annotateProperties.setProperty("hardParagraph", "no");
+    annotateProperties.setProperty("untokenizable", "no");
+    return annotateProperties;
+  }
+  
   /**
-   * Set a Properties object with the CLI parameters for NER annotation.
-   * 
-   * @param model
-   *          the model parameter
-   * @param language
-   *          language parameter
-   * @param lexer
-   *          rule based parameter
-   * @param dictTag
-   *          directly tag from a dictionary
-   * @param dictPath
-   *          directory to the dictionaries
-   * @return the properties object
+   * Generate Properties objects for CLI usage.
+   * @param model the model to perform the annotation
+   * @param language the language
+   * @param multiwords whether multiwords are to be detected
+   * @param dictag whether tagging from a dictionary is activated
+   * @return a properties object
    */
+  private static Properties setPOSProperties(final String posModel, final String lemmaModel, String language) {
+    final Properties annotateProperties = new Properties();
+    annotateProperties.setProperty("model", posModel);
+    annotateProperties.setProperty("lemmatizerModel", lemmaModel);
+    annotateProperties.setProperty("language", language);
+    return annotateProperties;
+  }
+
   private Properties setNERProperties(String model) {
     Properties annotateProperties = new Properties();
     annotateProperties.setProperty("model", model);
